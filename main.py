@@ -1,4 +1,4 @@
-"""Selective dip-buy bot v2 for make.fun btc-race-24h-20261117-0603.
+"""Selective dip-buy bot v3-A (runner) for make.fun btc-race-24h-20261117-0603.
 
 Strategy (from the top-10 FINAL winners of the three earlier BTC races, NOT
 from any dev rank — dev rank was shown to be anti-predictive: the race-3
@@ -11,6 +11,12 @@ winner came from dev #2624/2840, our dev #59 entry finished #2523):
   -0.6% from the peak (trailing arms only once the peak is +0.6% above the
   entry — without the arm, small peaks then reversals were the losing
   rounds), or 240 bars held.
+- RUNNER (v3-A, the only change over v2): a fast bounce — close >= +0.3%
+  above the fill price within 5 bars of the fill — proves the move is real,
+  so this round's take-profit rises from +0.35% to +0.6% and the round rides
+  further. Validated walk-forward (helps one fold, neutral on the other);
+  it is what lifts RACE1 from +$1.44 to +$2.64 without touching any other
+  window.
 - RIDE (late V-recovery): bars 1330-1380 only, buy when the close is >= 1.8%
   below the 480-bar high AND >= 0.3% above the 480-bar low, on an up close.
   No take-profit — ride it with a -0.4% trail (armed at +1.2%) and a -1.5%
@@ -31,19 +37,20 @@ winner came from dev #2624/2840, our dev #59 entry finished #2523):
 Walk-forward evaluation (7 windows, NO dev rank anywhere in the selection),
 verified with the REAL bot through the protocol driver (integer harness fill
 model) — the float simulator and the real bot agree to the cent on every
-window: oldR1 +$1.74, RACE1 +$1.44, oldR2 +$1.63, RACE2 +$7.06,
+window: oldR1 +$1.74, RACE1 +$2.64, oldR2 +$1.63, RACE2 +$7.06,
 oldR3 +$11.97, RACE3 +$21.67, DEV +$1.69 — 7/7 windows profitable, 10/11
-rounds won (90.9%), prize zone 3/3, total +$47.20, max drawdown <= 2.07%,
-0 rejections, 2 DEV runs byte-identical. Per-round PnLs: +1.74, +1.35, +0.08,
+rounds won (90.9%), prize zone 3/3, total +$48.40, max drawdown <= 2.07%,
+0 rejections, 2 DEV runs byte-identical. Per-round PnLs: +1.74, +2.55, +0.08,
 +1.63, +4.21, +2.84, -13.53, +25.50, +5.79, +15.88, +1.69. Bootstrap 90% CI
-over rounds [-$1.76, +$100.45], P(total > 0) = 95% — the lower bound is
-slightly negative, so the "CI lower bound > 0" target is narrowly missed.
-Fee-2x survival: DEV 53%, oldR1 54%, oldR2 51%, oldR3 87%, RACE1 -11%
-(flips to -$0.16 — its margin is thin), RACE2 77%, RACE3 92%. Deflated
-Sharpe = 0.000 after correcting for ~1,550 optimization trials: with only
-11 rounds the edge is real in backtest but NOT statistically proven — do not
-present this as a guaranteed win. RACE1's prize zone is by $0.01 (+$1.44 vs
-the $1.43 bar), so it is the least certain of the three.
+over rounds [-$0.53, +$101.49], P(total > 0) = 95% — the lower bound is
+still slightly negative, so the "CI lower bound > 0" target is narrowly
+missed. Fee-2x survival: DEV 53%, oldR1 54%, oldR2 51%, oldR3 87%,
+RACE1 39% (stays positive at +$1.04 — its margin is thicker than v2's, which
+flipped to -$0.16), RACE2 77%, RACE3 92%. Deflated Sharpe = 0.000 after
+correcting for ~1,670 optimization trials: with only 11 rounds the edge is
+real in backtest but NOT statistically proven — do not present this as a
+guaranteed win. RACE1's prize zone is by $1.21 (+$2.64 vs the $1.43 bar),
+121x v2's $0.01 margin.
 The one losing round is oldR3's scalp (bar 827, -$13.53): a dip-buy in a
 grind-down regime (60-bar return flat at -0.16% while the 240-bar trend was
 -2.4%). Every filter that blocks it also kills a race-1 or race-2 winner
@@ -74,6 +81,10 @@ DIP_BPS = 120          # 1.2%: buy when close is this far below the 30-bar high
 LOOKBACK = 30          # bars of history the dip is measured against
 TREND_BPS = -50        # 60-bar return must be above -0.5%
 TP_BPS = 35            # 0.35% take-profit from the entry fill price
+# --- Runner (v3-A): a fast bounce after the fill raises this round's TP ---
+RUNNER_TP_BPS = 60     # 0.6%: TP once the bounce proves itself fast
+RUNNER_THR_BPS = 30    # 0.3%: the bounce that proves it, above the fill price
+RUNNER_BARS = 5        # bars after the fill in which the proof must appear
 SL_BPS = 100           # 1.0% stop-loss from the entry fill price
 TRAIL_BPS = 60         # 0.6% trailing stop from the peak since entry
 TRAIL_ACT_BPS = 60     # trailing arms only once the peak is +0.6% above entry
@@ -115,6 +126,7 @@ halted = False         # True once the loss halt has tripped
 pending_notional = 0   # notional of a buy sent on the previous batch, awaiting its fill
 pending_mode = "scalp"  # mode ("scalp"/"ride"/"ride2") of that pending buy
 mode = "scalp"         # mode of the open position (selects the exit rules)
+round_tp_bps = TP_BPS   # TP for the current scalp round (runner may raise it)
 
 
 def on_hello(state):
@@ -162,7 +174,7 @@ def _entry_price_from_cost(state):
 def _exit_params(m):
     """(tp_bps or None, sl_bps, trail_bps, trail_act_bps, max_hold) for a mode."""
     if m == "scalp":
-        return (TP_BPS, SL_BPS, TRAIL_BPS, TRAIL_ACT_BPS, MAX_HOLD)
+        return (round_tp_bps, SL_BPS, TRAIL_BPS, TRAIL_ACT_BPS, MAX_HOLD)
     return (RIDE_TP_BPS, RIDE_SL_BPS, RIDE_TRAIL_BPS, RIDE_TRAIL_ACT_BPS,
             RIDE_MAX_HOLD)
 
@@ -189,7 +201,7 @@ def _buy(state, m):
 
 def on_batch(state, batch):
     global entry_price, entry_seq, peak, fills, halted, pending_notional
-    global pending_mode, mode
+    global pending_mode, mode, round_tp_bps
     if state.warming_up:
         return []
     # The last batch's orders are always rejected (after_end): never order on it.
@@ -218,11 +230,17 @@ def on_batch(state, batch):
                 mode = "scalp"
             entry_seq = state.seq
             peak = entry_price
+            round_tp_bps = TP_BPS  # fresh round: base TP until the runner proves it
             fills += 1  # a buy fill actually landed
             pending_notional = 0
         if close > peak:
             peak = close
         held = state.seq - entry_seq
+        # Runner: a fast bounce (>= +0.3% within 5 bars of the fill) proves the
+        # move is real, so this round's TP rises to +0.6% and it rides further.
+        if mode == "scalp" and round_tp_bps == TP_BPS and held <= RUNNER_BARS \
+                and close * 10_000 >= entry_price * (10_000 + RUNNER_THR_BPS):
+            round_tp_bps = RUNNER_TP_BPS
         tp, sl, trail, tact, mh = _exit_params(mode)
         sell = False
         if tp is not None and close * 10_000 >= entry_price * (10_000 + tp):
@@ -248,6 +266,7 @@ def on_batch(state, batch):
     entry_price = 0
     entry_seq = -1
     peak = 0
+    round_tp_bps = TP_BPS
     if pending_notional > 0:
         # No position appeared: the buy sent last batch was rejected.
         pending_notional = 0
